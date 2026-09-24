@@ -696,6 +696,21 @@ struct ArticulatedSkinParams [equality] {
   // @note For best performance, combine subsampling with @ref boundaryElementType = @ref
   // ActorBoundaryElementType::P1Q1.
   Optional<BoundarySubsamplingParams> boundarySubsampling;
+
+  // @brief Local names of links that do not act as colliding actors.
+  //
+  // @note A listed link contributes no rigid contact; the skin collides in its place. A link that
+  // is not listed keeps its own rigid contact, and the skin still collides over it, so both can
+  // generate contact in the same region.
+  // @note On an articulated actor, unset means no link collides and the skin is the sole colliding
+  // actor, while an empty list means every link collides.
+  // @note Each entry must be non-empty and must match a skeleton link local name.
+  // @note On a soft-skinned actor, @ref SoftSkinnedActorParams::enableCollidingLinks governs every
+  // link this list does not name: a link collides only when that flag is true and the link is not
+  // listed here. Unset therefore leaves that flag in sole control.
+  // @note This setting does not affect whether the links act as colliders; see
+  // @ref ArticulatedLinkParams::colliderType.
+  Optional<DynamicArray<String>> nonCollidingLinks;
 }
 
 // @brief Parameters for a cycle-closing joint within an articulated actor.
@@ -820,6 +835,9 @@ struct SoftSkinnedActorParams {
   // actor's shape must be defined directly in the reference frame of the articulated actor. The
   // soft-skinned actor's placement in scene world is provided by
   // @ref ArticulatedActorParams::worldFromRoot from @ref skeletonParams.
+  // @note For a blended skin, author the skin and nested-soft shapes in the same rest frame and use
+  // the articulation skin as the canonical source for each positively blended vertex's rest
+  // position and ordered skinning data.
   //
   // @see hasGravity, hasInertia, hasStress
   DynamicArray<SoftActorParams> softParams;
@@ -1363,8 +1381,11 @@ struct ContactPoint {
   // @note @ref force is already weighted by this value.
   real intWeight;
 
-  // @brief Element index on the surface mesh of @ref actorA.
+  // @brief Element index in the mesh used for colliding samples on @ref actorA.
   //
+  // @note For shell actors, this is the physics mesh returned by @ref Actor::GetMesh unless
+  // contact-skin contact is enabled, in which case it is the compact contact skin returned by @ref
+  // Actor::GetSurfaceMesh.
   // @note For rod actors, this field is not populated and is reported as 0. Use @ref sampleIndex
   // to identify the contact location.
   int elementIndex = -1;
@@ -1388,8 +1409,11 @@ struct ContactPoint {
 // @see QueryType::NodeContactForces, Actor::RegisterQuery, Actor::GetNodeContactForcesWorld
 struct NodeContactForce {
 
-  // @brief Node index in the volumetric mesh (for actors with a volumetric mesh) or surface mesh
-  // (for actors without a volumetric mesh).
+  // @brief Node index in the volumetric mesh or the mesh used for colliding samples.
+  //
+  // @note For shell actors, this is the physics mesh returned by @ref Actor::GetMesh unless
+  // contact-skin contact is enabled, in which case it is the compact contact skin returned by @ref
+  // Actor::GetSurfaceMesh.
   int index;
 
   // @brief Contact force [N] applied to the node.

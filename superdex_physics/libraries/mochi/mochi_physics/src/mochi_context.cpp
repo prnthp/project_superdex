@@ -189,12 +189,20 @@ static void ValidateShapeTransform(Real3 const& scale, TransformRT const& rt, Er
       "Invalid shape scale. Scale must be non-zero on all 3 axes.");
 }
 
+// The path component of a file cache key. Normalizing it lets different spellings of one file
+// (mixed separators, "a/../b") share a cache entry, and lets ClearFileFromCache evict a file it
+// was given under a different spelling than the load used. Case is deliberately not folded: that
+// would be wrong on a case-sensitive filesystem.
+static std::string NormalizeFileCachePath(std::string_view path) {
+  return std::filesystem::path(path).lexically_normal().generic_string();
+}
+
 // Format a key for lookup in the file cache.
 static std::string
 GetFileCacheKey(std::string_view path, Real3 const& scale, TransformRT const& transform) {
   return Format(
       "%s:%s:%s:%s",
-      std::string(path).c_str(),
+      NormalizeFileCachePath(path).c_str(),
       SReflect::ToJsonString(scale).c_str(),
       SReflect::ToJsonString(transform.GetRotation()).c_str(),
       SReflect::ToJsonString(transform.GetTranslation()).c_str());
@@ -277,6 +285,7 @@ ShapeHandle ContextImpl::LoadShapeFromFile(
   ValidateShapeTransform(bakeScale, bakeTransform, error);
   MOCHI_ERROR_IF(filePath.empty(), error, "Invalid file path");
   MOCHI_ERROR_RETURN(error, {});
+  ScopedSchedulerBinding schedulerBinding(GetTaskScheduler());
 
   auto doLoad = [&](Error& err) {
     // Load the file (any supported format)
@@ -310,8 +319,6 @@ ShapeHandle ContextImpl::LoadShapeFromFile(
 ShapeHandle experimental::CreateDeepFlowShape(
     Context* context,
     DeepModelParams const& params, // Parameters of a deep model
-    NeuralComputeType computeType,
-    int preallocMemSize, // Amount of preallocated GPU memory. Only used if computeType is TorchGpu
     Error& error) {
   MOCHI_ERROR_IF(!context, error, "Invalid context");
   MOCHI_ERROR_IF(
@@ -325,8 +332,6 @@ ShapeHandle experimental::CreateDeepFlowShape(
       params.scale,
       Real3(params.shiftX, params.shiftY, params.shiftZ),
       params.numDof,
-      computeType,
-      preallocMemSize,
       error);
   MOCHI_ERROR_RETURN(error, {});
 
@@ -376,6 +381,7 @@ ShapeHandle ContextImpl::LoadShapeFromBytes(
   ValidateShapeTransform(bakeScale, bakeTransform, error);
   MOCHI_ERROR_IF(fileData.empty(), error, "No data");
   MOCHI_ERROR_RETURN(error, {});
+  ScopedSchedulerBinding schedulerBinding(GetTaskScheduler());
 
   // Load the file from memory (any supported format)
   ModelData model = model::LoadFromBytes(fileData, format, error);
@@ -560,16 +566,11 @@ void ContextImpl::ClearFileCache() {
 
 void ContextImpl::ClearFileFromCache(std::string_view filePath) {
   std::lock_guard lock(_mutex);
-  // Non-articulated shapes are cached with key = "<filePath>:<scale>:<rotation>:<translation>".
-  // Articulated shapes are cached with key = "<filePath>".
-  // Remove all keys that match these patterns.
-  std::string keyPrefix;
-  keyPrefix.reserve(filePath.length() + 1);
-  keyPrefix.assign(filePath);
+  // Keys are "<normalized path>:<scale>:<rotation>:<translation>" (see GetFileCacheKey), so every
+  // bake variant of this file is matched by the normalized path plus the separator.
+  std::string keyPrefix = NormalizeFileCachePath(filePath);
   keyPrefix.push_back(':');
-  std::erase_if(_fileCache, [&](auto const& pair) {
-    return pair.first == filePath || pair.first.starts_with(keyPrefix);
-  });
+  std::erase_if(_fileCache, [&](auto const& pair) { return pair.first.starts_with(keyPrefix); });
 }
 
 Scene* ContextImpl::CreateScene(std::string_view name) {
@@ -1072,6 +1073,24 @@ static MeshDataView MakeMeshDataView(MeshPtr const& mesh) {
   return view;
 }
 
+static MeshDataView MakeAuxiliaryMeshDataView(
+    TriangularMesh const* mesh,
+    MeshEmbedding const* embedding) {
+  if (!mesh) {
+    return {};
+  }
+
+  auto view = MakeMeshDataView(mesh);
+  if (auto const* linearEmbedding = dynamic_cast<LinearMeshEmbedding const*>(embedding)) {
+    view.skinning.emplace();
+    view.skinning->weightsPerNode =
+        static_cast<int>(linearEmbedding->GetNumSkinningWeightsPerEntry());
+    view.skinning->indices = linearEmbedding->GetIndices();
+    view.skinning->weights = linearEmbedding->GetWeights();
+  }
+  return view;
+}
+
 MeshDataView ContextImpl::GetShapeMesh(ShapeHandle shape, Error& error) const {
   MOCHI_ERROR_RETURN(error, {});
 
@@ -1119,6 +1138,29 @@ MeshDataView ContextImpl::GetShapeSurfaceMesh(ShapeHandle shape, Error& error) c
   return shapePtr->GetSurfaceMeshData();
 }
 
+MeshDataView ContextImpl::GetShapeContactSkinMesh(ShapeHandle shape, Error& error) const {
+  MOCHI_ERROR_RETURN(error, {});
+
+  ConstShapePtr shapePtr = GetShapeSharedPtr(shape);
+  MOCHI_ERROR_IF_NOT(shapePtr, error, "Cannot get shape contact skin. Invalid shape handle.");
+  MOCHI_ERROR_RETURN(error, {});
+
+  TriangularMesh const* contactSkinPtr = nullptr;
+  MeshEmbedding const* embeddingPtr = nullptr;
+
+  if (auto const* tetmesh = dynamic_cast<TetrahedralMeshShape const*>(shapePtr.get())) {
+    contactSkinPtr = tetmesh->GetContactSkin().get();
+    embeddingPtr = tetmesh->GetContactSkinEmbedding().get();
+  } else if (auto const* trimesh = dynamic_cast<TriangularMeshShape const*>(shapePtr.get())) {
+    contactSkinPtr = trimesh->GetContactSkin().get();
+    embeddingPtr = trimesh->GetContactSkinEmbedding().get();
+  } else if (auto const* polyline = dynamic_cast<PolylineShape const*>(shapePtr.get())) {
+    contactSkinPtr = polyline->GetContactSkin().get();
+  }
+
+  return MakeAuxiliaryMeshDataView(contactSkinPtr, embeddingPtr);
+}
+
 MeshDataView ContextImpl::GetShapeVisualMesh(ShapeHandle shape, Error& error) const {
   MOCHI_ERROR_RETURN(error, {});
 
@@ -1137,25 +1179,10 @@ MeshDataView ContextImpl::GetShapeVisualMesh(ShapeHandle shape, Error& error) co
     embeddingPtr = trimesh->GetVisualEmbedding().get();
   } else if (auto const* polyline = dynamic_cast<PolylineShape const*>(shapePtr.get())) {
     visualMeshPtr = polyline->GetVisualMesh().get();
-    // Rod visual mesh embedding is nonlinear and incompatible with SkinningDataView.
+    // Polyline visual mesh embeddings are nonlinear and are not exposed by this view.
   }
 
-  if (!visualMeshPtr) {
-    // Shape doesn't have a visual mesh.
-    return {};
-  }
-
-  auto view = MakeMeshDataView(visualMeshPtr);
-  if (auto const* linearEmbedding = dynamic_cast<LinearMeshEmbedding const*>(embeddingPtr)) {
-    view.skinning.emplace();
-    view.skinning->weightsPerNode =
-        static_cast<int>(linearEmbedding->GetNumSkinningWeightsPerEntry());
-    view.skinning->indices = linearEmbedding->GetIndices();
-    view.skinning->weights = linearEmbedding->GetWeights();
-  }
-  // LinearMeshEmbedding is the only MeshEmbedding type.
-
-  return view;
+  return MakeAuxiliaryMeshDataView(visualMeshPtr, embeddingPtr);
 }
 
 Aabb ContextImpl::GetShapeAabb(ShapeHandle shape, Error& error) const {

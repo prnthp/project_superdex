@@ -2005,12 +2005,21 @@ class BlendingData:
     """Name of the soft source shape."""
     @property
     def indices(self) -> DynamicArrayInt:
-        """Indices for blending. Size is numNodes * 2."""
+        """Nested-soft source vertex indices for each target vertex.
+
+        Entry `i` identifies the vertex in the nested soft shape for target vertex `i`.
+        The index is ignored when `weights[i]` is zero. The size equals the number of
+        target vertices.
+        """
     @indices.setter
     def indices(self, value: ArrayLikeInt) -> None: ...
     @property
     def weights(self) -> DynamicArrayReal:
-        """Weights for blending. Size is numNodes * 2."""
+        """Nested-soft blend weights for each target vertex.
+
+        Entry `i` is in `[0, 1]`, where zero is purely articulated and one is fully
+        nested-soft. The size equals the number of target vertices.
+        """
     @weights.setter
     def weights(self, value: ArrayLikeReal) -> None: ...
     @overload
@@ -2040,15 +2049,15 @@ class BlendingDataView:
         :class:`~superdex.physics.BlendingData`
     """
     source_shape: str
-    """Name of the soft source shape."""
+    """See :attr:`~superdex.physics.BlendingData.source_shape`."""
     @property
     def indices(self) -> SpanConstInt:
-        """Indices for blending. Size is numNodes * 2."""
+        """See :attr:`~superdex.physics.BlendingData.indices`."""
     @indices.setter
     def indices(self, value: ArrayLikeInt) -> None: ...
     @property
     def weights(self) -> SpanConstReal:
-        """Weights for blending. Size is numNodes * 2."""
+        """See :attr:`~superdex.physics.BlendingData.weights`."""
     @weights.setter
     def weights(self, value: ArrayLikeReal) -> None: ...
     @overload
@@ -2534,12 +2543,13 @@ class ModelData:
     mesh: Optional[MeshData]
     visual_mesh: Optional[MeshData]
     contact_skin_mesh: Optional[MeshData]
-    """Optional triangular mesh used for surface queries and, when selected as the
-    rod's contact geometry, for contact quadrature.
+    """Optional triangular mesh used for surface queries and, when selected as a shell
+    or rod actor's contact geometry, for contact quadrature.
 
-    The skinning indices reference primary-mesh nodes for triangular and tetrahedral
-    meshes, and primary-mesh elements for polylines. Currently consumed only by rod
-    actors.
+    For triangular and tetrahedral primary meshes, the skinning data is a node-based
+    linear embedding whose indices reference primary-mesh nodes. For polylines, the
+    indices reference primary-mesh elements and define the rod's element-based
+    embedding.
     """
     @property
     def blending(self) -> Optional[DynamicArrayBlendingData]: ...
@@ -2601,12 +2611,13 @@ class ModelDataView:
     mesh: Optional[MeshDataView]
     visual_mesh: Optional[MeshDataView]
     contact_skin_mesh: Optional[MeshDataView]
-    """Optional triangular mesh used for surface queries and, when selected as the
-    rod's contact geometry, for contact quadrature.
+    """Optional triangular mesh used for surface queries and, when selected as a shell
+    or rod actor's contact geometry, for contact quadrature.
 
-    The skinning indices reference primary-mesh nodes for triangular and tetrahedral
-    meshes, and primary-mesh elements for polylines. Currently consumed only by rod
-    actors.
+    For triangular and tetrahedral primary meshes, the skinning data is a node-based
+    linear embedding whose indices reference primary-mesh nodes. For polylines, the
+    indices reference primary-mesh elements and define the rod's element-based
+    embedding.
     """
     @property
     def blending(self) -> Optional[DynamicArrayBlendingDataView]: ...
@@ -6032,6 +6043,35 @@ class ArticulatedSkinParams:
         :attr:`~superdex.physics.ArticulatedSkinParams.boundary_element_type` =
         :class:`P1Q1 <superdex.physics.ActorBoundaryElementType>`.
     """
+    @property
+    def non_colliding_links(self) -> Optional[DynamicArrayString]:
+        """Local names of links that do not act as colliding actors.
+
+        Note:
+            A listed link contributes no rigid contact; the skin collides in its place.
+            A link that is not listed keeps its own rigid contact, and the skin still
+            collides over it, so both can generate contact in the same region.
+
+        Note:
+            On an articulated actor, unset means no link collides and the skin is the
+            sole colliding actor, while an empty list means every link collides.
+
+        Note:
+            Each entry must be non-empty and must match a skeleton link local name.
+
+        Note:
+            On a soft-skinned actor,
+            :attr:`~superdex.physics.SoftSkinnedActorParams.enable_colliding_links`
+            governs every link this list does not name: a link collides only when that
+            flag is true and the link is not listed here. Unset therefore leaves that
+            flag in sole control.
+
+        Note:
+            This setting does not affect whether the links act as colliders; see
+            :attr:`~superdex.physics.ArticulatedLinkParams.collider_type`.
+        """
+    @non_colliding_links.setter
+    def non_colliding_links(self, value: Optional[ArrayLikeString]) -> None: ...
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -6042,6 +6082,7 @@ class ArticulatedSkinParams:
         contact: ContactParams = ...,
         boundary_element_type: ActorBoundaryElementType | int = ...,
         boundary_subsampling: Optional[BoundarySubsamplingParams] = ...,
+        non_colliding_links: Optional[ArrayLikeString] = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
@@ -6261,6 +6302,11 @@ class SoftSkinnedActorParams:
             in scene world is provided by
             :attr:`~superdex.physics.ArticulatedActorParams.world_from_root` from
             :attr:`~superdex.physics.SoftSkinnedActorParams.skeleton_params`.
+
+        Note:
+            For a blended skin, author the skin and nested-soft shapes in the same rest
+            frame and use the articulation skin as the canonical source for each
+            positively blended vertex's rest position and ordered skinning data.
 
         See Also:
             :attr:`~superdex.physics.SoftSkinnedActorParams.has_gravity`,
@@ -7239,8 +7285,14 @@ class ContactPoint:
         value.
     """
     element_index: int
-    """Element index on the surface mesh of
+    """Element index in the mesh used for colliding samples on
     :attr:`~superdex.physics.ContactPoint.actor_a`.
+
+    Note:
+        For shell actors, this is the physics mesh returned by
+        :meth:`~superdex.physics.Actor.get_mesh` unless contact-skin contact is
+        enabled, in which case it is the compact contact skin returned by
+        :meth:`~superdex.physics.Actor.get_surface_mesh`.
 
     Note:
         For rod actors, this field is not populated and is reported as 0. Use
@@ -7302,8 +7354,13 @@ class NodeContactForce:
         :meth:`~superdex.physics.Actor.get_node_contact_forces_world`
     """
     index: int
-    """Node index in the volumetric mesh (for actors with a volumetric mesh) or surface
-    mesh (for actors without a volumetric mesh).
+    """Node index in the volumetric mesh or the mesh used for colliding samples.
+
+    Note:
+        For shell actors, this is the physics mesh returned by
+        :meth:`~superdex.physics.Actor.get_mesh` unless contact-skin contact is
+        enabled, in which case it is the compact contact skin returned by
+        :meth:`~superdex.physics.Actor.get_surface_mesh`.
     """
     @property
     def force(self) -> Real3:
@@ -8805,8 +8862,49 @@ def get_shape_surface_mesh(shape: ShapeHandle) -> MeshDataView:
     See Also:
         :class:`~superdex.physics.MeshDataView`,
         :func:`~superdex.physics.get_shape_mesh`,
+        :func:`~superdex.physics.get_shape_contact_skin_mesh`,
         :func:`~superdex.physics.get_shape_visual_mesh`,
         :meth:`~superdex.physics.Actor.get_surface_mesh`
+    """
+
+def get_shape_contact_skin_mesh(shape: ShapeHandle) -> MeshDataView:
+    """Get a view of the shape's contact-skin mesh data, including linear skinning data
+    if available.
+
+    Returns a triangle mesh (3 nodes per element) intended for contact handling.
+    Coordinates and connectivity are returned in contact-skin node-index space,
+    including any contact-skin nodes not referenced by the contact-skin
+    connectivity. The mesh includes linear skinning data for deformation when
+    available. Nonlinear skinning data, such as rod contact-skin embeddings, is not
+    exposed. For shapes without a contact skin, returns an empty view.
+
+    Args:
+        shape (ShapeHandle): Handle to a valid shape.
+
+    Returns:
+        A non-owning view of the shape's contact-skin mesh data, or an empty view if
+        the shape has no contact skin.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If an error occurs.
+
+    Note:
+        Can be called on any thread.
+
+    Note:
+        The returned view will be invalid after the shape handle has been released.
+
+    Note:
+        When linear contact-skin skinning data is present, skinning indices refer to
+        the node ordering returned by :func:`~superdex.physics.get_shape_mesh`, not
+        to the compact surface-node ordering returned by
+        :func:`~superdex.physics.get_shape_surface_mesh`.
+
+    See Also:
+        :class:`~superdex.physics.MeshDataView`,
+        :func:`~superdex.physics.get_shape_mesh`,
+        :func:`~superdex.physics.get_shape_surface_mesh`,
+        :func:`~superdex.physics.get_shape_visual_mesh`
     """
 
 def get_shape_visual_mesh(shape: ShapeHandle) -> MeshDataView:
@@ -8839,8 +8937,9 @@ def get_shape_visual_mesh(shape: ShapeHandle) -> MeshDataView:
         When linear visual-mesh skinning data is present, skinning indices refer to
         the node ordering returned by :func:`~superdex.physics.get_shape_mesh`, not
         to the compact surface-node ordering returned by
-        :func:`~superdex.physics.get_shape_surface_mesh`. Rod visual mesh embeddings
-        are nonlinear and are not exposed through this linear skinning field.
+        :func:`~superdex.physics.get_shape_surface_mesh`. Polyline visual mesh
+        embeddings are nonlinear and are not exposed through this linear skinning
+        field.
 
     See Also:
         :class:`~superdex.physics.MeshDataView`,
@@ -8997,8 +9096,10 @@ def clear_file_from_cache(file_path: str) -> None:
     combinations.
 
     Args:
-        file_path (str): Path to a file that may have been loaded. The match is
-            case-sensitive and must equal the path used at load time exactly.
+        file_path (str): Path to a file that may have been loaded. It is matched
+            against the path used at load time after lexical normalization, so
+            separator style and "." / ".." segments may differ. The match is
+            case-sensitive.
 
     Note:
         Call on any thread.
@@ -9725,9 +9826,11 @@ class Actor:
         simulation meshes, the surface is the boundary triangles. For triangular
         simulation meshes, the surface has the same triangle elements as the simulation
         mesh, but nodes not referenced by any surface triangle are omitted and remaining
-        nodes may be reindexed. For rod actors with an authored contact skin, returns
-        that skin regardless of the actor's selected collision representation. Returns
-        an empty view if the actor does not have a surface mesh.
+        nodes may be reindexed. For shell and rod actors with an embedded
+        :attr:`~superdex.physics.ModelData.contact_skin_mesh`, returns that contact skin
+        regardless of the actor's selected collision representation. For articulated
+        actors with a skinned simulation surface, returns that surface. Returns an empty
+        view if the actor does not have a surface mesh.
 
         Returns:
             A non-owning view of the actor's reference surface mesh, or an empty view if
@@ -9822,8 +9925,8 @@ class Actor:
             :meth:`~superdex.physics.Actor.get_surface_mesh`.
 
         Note:
-            Supported for rod actors whose shape has an authored contact skin,
-            regardless of whether that skin is selected for collision.
+            Supported for shell and rod actors whose shape has an authored usable
+            contact skin, regardless of whether that skin is selected for collision.
 
         See Also:
             :meth:`~superdex.physics.Actor.register_query`,
@@ -9860,8 +9963,8 @@ class Actor:
             :meth:`~superdex.physics.Actor.get_surface_mesh`.
 
         Note:
-            Supported for rod actors whose shape has an authored contact skin,
-            regardless of whether that skin is selected for collision.
+            Supported for shell and rod actors whose shape has an authored usable
+            contact skin, regardless of whether that skin is selected for collision.
 
         See Also:
             :meth:`~superdex.physics.Actor.register_query`, :class:`SURFACE_NODE_NORMALS
@@ -9985,11 +10088,12 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
-            step completes.
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>` unless the surface mesh is linearly embedded
+            in the simulation mesh. Results are available after the simulation step
+            completes.
 
         Warning:
             This is a synchronous call and may be expensive.
@@ -10023,11 +10127,12 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
-            step completes.
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>` unless the surface mesh is linearly embedded
+            in the simulation mesh. Results are available after the simulation step
+            completes.
 
         Warning:
             This is a synchronous call and may be expensive.
@@ -10061,11 +10166,12 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
-            step completes.
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>` unless the surface mesh is linearly embedded
+            in the simulation mesh. Results are available after the simulation step
+            completes.
 
         Warning:
             This is a synchronous call and may be expensive.
@@ -12872,6 +12978,11 @@ class Scene:
 
         Warning:
             The skeleton must have at least one non-Hard joint.
+
+        Warning:
+            For a blended skin, each vertex pair with a positive nested-soft blend
+            weight must have exactly equal rest positions and identical ordered skinning
+            indices and weights.
 
         See Also:
             :class:`~superdex.physics.SoftSkinnedActorParams`,

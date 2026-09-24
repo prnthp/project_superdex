@@ -172,9 +172,9 @@ namespace mochi {
 /// @note The input matrix must be a supported matrix or linear operator type. For the particular
 /// case of an IslandOperators, the preconditioner is constructed (or updated) in the linear solver
 /// for consistency with the case in which the input is a matrix type. That is, the caller is NOT
-/// responsible for calling @ref IslandOperators::MakePerActorPrec before @ref LinearSolver::Solve.
-/// Doing so would be inefficient (the preconditioner would be computed or updated twice) but not
-/// incorrect.
+/// responsible for calling @ref IslandOperators::MakePerActorPreconditionerEntries before @ref
+/// LinearSolver::Solve. Doing so would be inefficient (the preconditioner would be computed or
+/// updated twice) but not incorrect.
 /// @note It provides a unified interface for solving a linear system with various solver and
 /// preconditioner types.
 /// @note It manages internal state for preconditioner recycling and Krylov subspace recycling.
@@ -216,6 +216,11 @@ class LinearSolver {
   /// operator types, the dense LDLt factorization is always used.
   static constexpr int kSparseLdltDofThreshold = 200;
 
+  /// @brief Constructs the solver.
+  ///
+  /// @param[in] params Solver parameters.
+  /// @param[in] precRecyclingMgr Preconditioner recycling manager, which may be shared with other
+  /// solvers to reuse the preconditioner across them. If null, the solver creates its own.
   LinearSolver(
       KrylovSolverParams const& params,
       std::shared_ptr<PreconditionerRecyclingManager<T>> precRecyclingMgr = nullptr)
@@ -257,9 +262,10 @@ class LinearSolver {
   /// @param[in] A Matrix of the linear system.
   /// @param[in] b Vector with the right-hand side.
   /// @param[in,out] x Vector with the initial guess at input and the solution at output.
-  /// @param[in] hasOperatorChanged Boolean flag for whether the operator has changed since the
-  /// previous solve. Used as performance optimization for direct solvers, Krylov subspace recycling
-  /// and preconditioner recycling if the operator has not changed. Default is true.
+  /// @param[in] hasOperatorChanged Whether @p A has changed since the previous solve, including
+  /// solves by other solvers sharing the preconditioner recycling manager. If false, data computed
+  /// from the previous operator, e.g. factorizations and the preconditioner, is reused, so passing
+  /// false for a changed operator is incorrect. Default is true.
   /// @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint enables
   /// iterative solvers to skip work and requires @p x to be exactly zero.
   template <int kPrecBlockSize = 3, typename MatrixType, typename RhsType, typename SolType>

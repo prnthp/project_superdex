@@ -43,6 +43,15 @@ void PreStepDeformableActorAsync(entt::registry& reg, entt::entity e);
 // actors, including (volume) soft actors, shell actors and rod actors.
 namespace deformable {
 
+// Update the maximum world-space nodal speed for an ordinary soft or shell actor.
+void UpdateMaxGeometrySpeed(
+    ecs::Included<TagDeformableActor>,
+    ecs::Excluded<TagNestedSoftActor, TagRodActor>,
+    CVelocitySlice<real, TimeStep::Current> const& velocity,
+    CColliderInfo const& collider,
+    CContactSkinningData const* contactSkinning,
+    CConservativeStepBounds& outStepBounds);
+
 template <typename BlockSparseMatViewT, typename ElemMassMatT>
 void SetZeroMassMatrix(
     BlockSparseMatViewT& outMassMatrix,
@@ -181,7 +190,7 @@ template <class ElementT, int kBatchSize = kDefaultFemBatchSize, size_t kMassDof
 template <typename ActorTag, typename DiscretizationType>
 void SetupCollidingJacobians(
     ecs::Included<ActorTag>,
-    ecs::Excluded<TagRomActor, TagNestedSoftActor, TagRodSurfaceContact>,
+    ecs::Excluded<TagRomActor, TagNestedSoftActor, TagUseDeformableContactSkin>,
     DiscretizationType const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,

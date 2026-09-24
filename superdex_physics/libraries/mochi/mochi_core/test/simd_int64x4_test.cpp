@@ -218,13 +218,7 @@ TEST(Vec4l, Get) {
   EXPECT_EQ(3, Get<2>(a));
   EXPECT_EQ(-4, Get<3>(a));
 
-  // Slower runtime version
-  EXPECT_EQ(1, Get(a, 0));
-  EXPECT_EQ(2, Get(a, 1));
-  EXPECT_EQ(3, Get(a, 2));
-  EXPECT_EQ(-4, Get(a, 3));
-
-  // Same but with operator[] (read only)
+  // Runtime version
   EXPECT_EQ(1, a[0]);
   EXPECT_EQ(2, a[1]);
   EXPECT_EQ(3, a[2]);
@@ -485,10 +479,15 @@ TEST(Vec4l, Store) {
   EXPECT_SPAN_EQ((std::array<int64_t, 4>{1, 2, 3, 0}), Span(&result[1], 4));
   Store<4>(&result[1], v);
   EXPECT_SPAN_EQ((std::array<int64_t, 4>{1, 2, 3, 4}), Span(&result[1], 4));
-  result.clear();
-  result.resize(5);
-  Store(&result[1], v, 0);
-  EXPECT_SPAN_EQ((std::array<int64_t, 4>{0, 0, 0, 0}), Span(&result[1], 4));
+  for (int n = 0; n <= Vec4l::kSize; ++n) {
+    result.assign(6, 911);
+    auto expected = result;
+    for (int i = 0; i < n; ++i) {
+      expected[i + 1] = i + 1;
+    }
+    Store(&result[1], v, n);
+    EXPECT_EQ(expected, result);
+  }
   Store(&result[1], v);
   EXPECT_SPAN_EQ((std::array<int64_t, 4>{1, 2, 3, 4}), Span(&result[1], 4));
 }

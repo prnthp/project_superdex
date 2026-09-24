@@ -23,6 +23,7 @@
 #include <mochi_physics/src/mochi_integration.h>
 #include <mochi_physics/src/mochi_rod.h>
 #include <mochi_physics/src/mochi_rod_pose.h>
+#include <mochi_physics/src/mochi_step.h>
 #include "mochi_core/test/mochi_test_helpers.h"
 #include "mochi_physics_test_fixture.h"
 
@@ -1420,7 +1421,7 @@ class MochiRodSurfaceMeshes : public test::MochiSceneTestBase {
     auto const& contactSkin = reg.get<CRodContactSkin const>(entity);
     CVisualMesh visualLike{contactSkin.mesh};
     CRodVisualMeshEmbedding embeddingLike{contactSkin.embedding};
-    CRodContactSkinningData skinningData;
+    CContactSkinningData skinningData;
     rod::InitializeContactSkinningJacobian(contactSkin, polylineMesh, skinningData);
     rod::ResolveContactSkinningJacobian(contactSkin, polylineMesh, basePose, skinningData);
 
@@ -1503,6 +1504,165 @@ class MochiRodSurfaceMeshes : public test::MochiSceneTestBase {
   }
 };
 
+TEST_F(MochiRodSurfaceMeshes, CenterlineMaxGeometrySpeedIgnoresTwist) {
+  ShapeHandle const shape = CreateRodShapeWithVisualMesh();
+  Actor* const actor = CreateTestRodActor(shape);
+  entt::entity const entity = GetEntity(actor);
+
+  // Centerline contact geometry depends only on node positions; unlike surface contact, twist does
+  // not move it.
+  DynamicArray<real> velocity(actor->GetNumDofs(), 0_r);
+  velocity[fem::kRodThetaDofOffset] = 100_r;
+  velocity[fem::kNumRodFields] = 3_r;
+  velocity[fem::kNumRodFields + 1] = -4_r;
+  actor->SetNodeVelocitiesLocal(MakeConstSpan(velocity), test::ExpectOK{});
+
+  UpdateMaxGeometrySpeeds(GetRegistry());
+
+  EXPECT_NEAR_EQ(5_r, GetRegistry().get<CConservativeStepBounds const>(entity).maxGeometrySpeed);
+}
+
+TEST_F(MochiRodSurfaceMeshes, SurfaceContactMaxGeometrySpeedIncludesTwist) {
+  ShapeHandle const shape = CreateRodShapeWithContactSkin(/*includeVisualMesh=*/false);
+  Actor* const actor = CreateTestRodActorWithContactSkin(shape);
+  entt::entity const entity = GetEntity(actor);
+
+  real constexpr kTranslationSpeed = 3_r;
+  real constexpr kTwistRate = 40_r;
+  DynamicArray<real> velocity(actor->GetNumDofs(), 0_r);
+  for (int node = 0; node < kNumNodes; ++node) {
+    velocity[node * fem::kNumRodFields] = kTranslationSpeed;
+  }
+  velocity[fem::kNumRodFields + fem::kRodThetaDofOffset] = kTwistRate;
+  actor->SetNodeVelocitiesLocal(MakeConstSpan(velocity), test::ExpectOK{});
+
+  UpdateMaxGeometrySpeeds(GetRegistry());
+
+  real const timeStep = static_cast<real>(GetRegistry().ctx<CSceneTime const>().DeltaTime());
+  real const twistAngle = kTwistRate * timeStep;
+  Real3 constexpr kElementMidpoint{0.375_r, 0_r, 0_r};
+  Real3 constexpr kTangent{1_r, 0_r, 0_r};
+  Real3 constexpr kCenterlineVelocity{kTranslationSpeed, 0_r, 0_r};
+  real expectedMaxSpeed = 0_r;
+  Span<Real3 const> const surfacePositions =
+      Unflatten<Real3 const>(actor->GetSurfaceMesh().coordinates);
+  for (Real3 const& surfacePosition : surfacePositions) {
+    Real3 const radialOffset = surfacePosition - kElementMidpoint;
+    Real3 const rotatedOffset =
+        Cos(twistAngle) * radialOffset + Sin(twistAngle) * Cross(kTangent, radialOffset);
+    Real3 const expectedVelocity = kCenterlineVelocity + (rotatedOffset - radialOffset) / timeStep;
+    expectedMaxSpeed = Max(expectedMaxSpeed, Norm(expectedVelocity));
+  }
+
+  EXPECT_NEAR_EQ(
+      expectedMaxSpeed, GetRegistry().get<CConservativeStepBounds const>(entity).maxGeometrySpeed);
+}
+
+TEST_F(
+    MochiRodSurfaceMeshes,
+    SurfaceContactMaxGeometrySpeedMatchesJacobianForWeightedClosedLoopTranslation) {
+  _visNodePositions = {
+      Real3{0.1_r, 0.1_r, 0.1_r}, Real3{0.5_r, -0.1_r, 0.2_r}, Real3{0.2_r, 0.15_r, 0.6_r}};
+  _visTriangles = {Int3{0, 1, 2}};
+  _weightsPerNode = 2;
+  _elementIndices = {3, 0, 3, 1, 3, 2};
+  _weights = {0.25_r, 0.75_r, 0.4_r, 0.6_r, 0.65_r, 0.35_r};
+  ShapeHandle const shape = CreateRodShapeWithContactSkin(
+      /*includeVisualMesh=*/false, /*isClosedLoop=*/true);
+  Actor* const actor = CreateTestRodActorWithContactSkin(shape);
+  entt::entity const entity = GetEntity(actor);
+
+  DynamicArray<real> velocity = {
+      0.2_r,
+      -0.3_r,
+      0.5_r,
+      0_r,
+      -0.4_r,
+      0.7_r,
+      0.1_r,
+      0_r,
+      0.6_r,
+      0.2_r,
+      -0.5_r,
+      0_r,
+      -0.1_r,
+      -0.6_r,
+      0.8_r,
+      0_r};
+  actor->SetNodeVelocitiesLocal(MakeConstSpan(velocity), test::ExpectOK{});
+
+  UpdateMaxGeometrySpeeds(GetRegistry());
+  real const directMaxSpeed =
+      GetRegistry().get<CConservativeStepBounds const>(entity).maxGeometrySpeed;
+
+  auto& reg = GetRegistry();
+  auto const& contactSkin = reg.get<CRodContactSkin const>(entity);
+  auto const& polylineMesh = reg.get<CPolylineMesh const>(entity);
+  auto const& rodPose = reg.get<CRodPose<TimeStep::Current> const>(entity);
+  auto& skinningData = reg.get<CContactSkinningData>(entity);
+  rod::ResolveContactSkinningJacobian(contactSkin, polylineMesh, rodPose, skinningData);
+
+  auto const& dofVelocity = reg.get<CVelocitySlice<real, TimeStep::Current> const>(entity).value;
+  real expectedMaxSpeed = 0_r;
+  for (int row = 0; row < skinningData.jacobian.Rows(); ++row) {
+    Real3 surfaceVelocity{};
+    auto const indices = skinningData.jacobian.Indices(row);
+    auto const values = skinningData.jacobian.Values(row);
+    for (int i = 0; i < isize(indices); ++i) {
+      surfaceVelocity += dofVelocity[indices[i]] * values[i];
+    }
+    expectedMaxSpeed = Max(expectedMaxSpeed, Norm(surfaceVelocity));
+  }
+
+  EXPECT_NEAR_EQ(expectedMaxSpeed, directMaxSpeed);
+}
+
+TEST_F(MochiRodSurfaceMeshes, SurfaceContactMaxGeometrySpeedIncludesOpposingBlendedTwists) {
+  real constexpr kMaxRadius = 0.11_r;
+  _visNodePositions = {
+      Real3{0.25_r, 0.1_r, 0_r}, Real3{0.25_r, 0.1_r, 0.01_r}, Real3{0.25_r, kMaxRadius, 0_r}};
+  _visTriangles = {Int3{0, 1, 2}};
+  _weightsPerNode = 2;
+  _elementIndices = {0, 1, 0, 1, 0, 1};
+  _weights = {0.5_r, 0.5_r, 0.5_r, 0.5_r, 0.5_r, 0.5_r};
+  ShapeHandle const shape = CreateRodShapeWithContactSkin(/*includeVisualMesh=*/false);
+  Actor* const actor = CreateTestRodActorWithContactSkin(shape);
+  entt::entity const entity = GetEntity(actor);
+
+  real constexpr kTwistRate = 40_r;
+  DynamicArray<real> velocity(actor->GetNumDofs(), 0_r);
+  velocity[fem::kRodThetaDofOffset] = kTwistRate;
+  velocity[fem::kNumRodFields + fem::kRodThetaDofOffset] = -kTwistRate;
+  actor->SetNodeVelocitiesLocal(MakeConstSpan(velocity), test::ExpectOK{});
+
+  UpdateMaxGeometrySpeeds(GetRegistry());
+
+  real const timeStep = static_cast<real>(GetRegistry().ctx<CSceneTime const>().DeltaTime());
+  real const expectedMaxSpeed = (1_r - Cos(kTwistRate * timeStep)) * kMaxRadius / timeStep;
+  EXPECT_NEAR_EQ(
+      expectedMaxSpeed, GetRegistry().get<CConservativeStepBounds const>(entity).maxGeometrySpeed);
+}
+
+TEST_F(MochiRodSurfaceMeshes, SurfaceContactMaxGeometrySpeedIncludesPointCloudCollider) {
+  ShapeHandle const shape = CreateRodShapeWithContactSkin(/*includeVisualMesh=*/false);
+  RodActorParams params = GetRodActorParams(shape, /*useContactSkin=*/true);
+  params.colliderType = ColliderType::PointCloud;
+  Actor* const actor = CreateRodActor(_scene, params, test::ExpectOK{});
+  entt::entity const entity = GetEntity(actor);
+
+  // The authored skin is embedded in the middle element, so node 0 affects only the centerline
+  // point-cloud collider.
+  real constexpr kEndpointSpeed = 5_r;
+  DynamicArray<real> velocity(actor->GetNumDofs(), 0_r);
+  velocity[0] = kEndpointSpeed;
+  actor->SetNodeVelocitiesLocal(MakeConstSpan(velocity), test::ExpectOK{});
+
+  UpdateMaxGeometrySpeeds(GetRegistry());
+
+  EXPECT_NEAR_EQ(
+      kEndpointSpeed, GetRegistry().get<CConservativeStepBounds const>(entity).maxGeometrySpeed);
+}
+
 TEST_F(MochiRodSurfaceMeshes, ReferenceConfigQueriesMatchInput) {
   ShapeHandle shape = CreateRodShapeWithVisualMesh();
   Actor* actor = CreateTestRodActor(shape);
@@ -1561,9 +1721,9 @@ TEST_F(MochiRodSurfaceMeshes, VisualOnlyRodHasNoSurfaceMesh) {
   auto const entity = mochi::GetEntity(reg, actor->GetHandle(), test::ExpectOK{});
   EXPECT_TRUE(reg.all_of<CFemSegmentDiscretization>(entity));
   EXPECT_FALSE(reg.all_of<CRodContactSkin>(entity));
-  EXPECT_FALSE(reg.all_of<CRodContactSkinningData>(entity));
+  EXPECT_FALSE(reg.all_of<CContactSkinningData>(entity));
   EXPECT_FALSE(reg.all_of<CFemSurfaceDiscretization>(entity));
-  EXPECT_FALSE(reg.all_of<TagRodSurfaceContact>(entity));
+  EXPECT_FALSE(reg.all_of<TagUseDeformableContactSkin>(entity));
 }
 
 TEST_F(MochiRodSurfaceMeshes, QueryWithoutVisualMeshFails) {
@@ -1601,9 +1761,9 @@ TEST_F(MochiRodSurfaceMeshes, UnskinnedVisualMeshIsIgnored) {
   EXPECT_FALSE(reg.all_of<CVisualMesh>(entity));
   EXPECT_FALSE(reg.all_of<CRodVisualMeshEmbedding>(entity));
   EXPECT_FALSE(reg.all_of<CRodContactSkin>(entity));
-  EXPECT_FALSE(reg.all_of<CRodContactSkinningData>(entity));
+  EXPECT_FALSE(reg.all_of<CContactSkinningData>(entity));
   EXPECT_FALSE(reg.all_of<CFemSurfaceDiscretization>(entity));
-  EXPECT_FALSE(reg.all_of<TagRodSurfaceContact>(entity));
+  EXPECT_FALSE(reg.all_of<TagUseDeformableContactSkin>(entity));
 }
 
 TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_InitializesSkinningJacobianSparsity) {
@@ -1615,13 +1775,13 @@ TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_InitializesSkinningJacobianSpar
 
   ASSERT_TRUE((reg.all_of<
                CRodContactSkin,
-               CRodContactSkinningData,
+               CContactSkinningData,
                CFemSurfaceDiscretization,
-               TagRodSurfaceContact>(entity)));
+               TagUseDeformableContactSkin>(entity)));
   EXPECT_FALSE(reg.all_of<CFemSegmentDiscretization>(entity));
 
   auto const& contactSkin = reg.get<CRodContactSkin const>(entity);
-  auto const& skinningData = reg.get<CRodContactSkinningData const>(entity);
+  auto const& skinningData = reg.get<CContactSkinningData const>(entity);
 
   auto const& jac = skinningData.jacobian;
 
@@ -1729,9 +1889,9 @@ TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_UsesDedicatedSurface) {
   auto const entity = mochi::GetEntity(reg, actor->GetHandle(), test::ExpectOK{});
   ASSERT_TRUE((reg.all_of<
                CRodContactSkin,
-               CRodContactSkinningData,
+               CContactSkinningData,
                CFemSurfaceDiscretization,
-               TagRodSurfaceContact>(entity)));
+               TagUseDeformableContactSkin>(entity)));
   EXPECT_FALSE(reg.all_of<CFemSegmentDiscretization>(entity));
 
   auto const& visualMesh = reg.get<CVisualMesh const>(entity);
@@ -1753,8 +1913,7 @@ TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_UsesDedicatedSurface) {
 
   _scene->Step(0_r);
   Aabb const expectedBounds = contactSkin.mesh->GetAabb();
-  Aabb const actualBounds =
-      GetAabb(reg.get<CBoundingVolume<TimeStep::Current> const>(entity).localShape);
+  Aabb const actualBounds = GetAabb(reg.get<CBoundingVolume const>(entity).localShape);
   EXPECT_NEAR_EQ(expectedBounds.GetMin(), actualBounds.GetMin());
   EXPECT_NEAR_EQ(expectedBounds.GetMax(), actualBounds.GetMax());
 }
@@ -1791,8 +1950,7 @@ TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_BoundsIncludePointCloudCollider
       }
       Aabb const pointCloudBounds = ExpandShape(CalcAabb(centerlinePositions), kRadius);
       Aabb const expectedBounds = GetAabb(surfaceBounds, pointCloudBounds);
-      Aabb const actualBounds =
-          GetAabb(reg.get<CBoundingVolume<TimeStep::Current> const>(entity).localShape);
+      Aabb const actualBounds = GetAabb(reg.get<CBoundingVolume const>(entity).localShape);
       EXPECT_NEAR_EQ(expectedBounds.GetMin(), actualBounds.GetMin());
       EXPECT_NEAR_EQ(expectedBounds.GetMax(), actualBounds.GetMax());
     };
@@ -1837,8 +1995,8 @@ TEST_F(MochiRodSurfaceMeshes, ContactSkinContact_WithoutVisualMesh) {
 
   auto& reg = GetRegistry();
   auto const entity = mochi::GetEntity(reg, actor->GetHandle(), test::ExpectOK{});
-  EXPECT_TRUE(
-      (reg.all_of<CRodContactSkin, CFemSurfaceDiscretization, TagRodSurfaceContact>(entity)));
+  EXPECT_TRUE((
+      reg.all_of<CRodContactSkin, CFemSurfaceDiscretization, TagUseDeformableContactSkin>(entity)));
   EXPECT_FALSE((reg.all_of<CVisualMesh, CFemSegmentDiscretization>(entity)));
   EXPECT_EQ(4, actor->GetSurfaceMesh().GetNumNodes());
   _scene->Step(0_r);
@@ -2265,7 +2423,7 @@ TEST_F(MochiRodSurfaceMeshes, DistinctVisualAndContactMeshesSupportMultiElementS
     auto const& polylineMesh = reg.get<CPolylineMesh const>(entity);
     auto const& basePose = reg.get<CRodPose<TimeStep::Current> const>(entity);
 
-    CRodContactSkinningData skinningData;
+    CContactSkinningData skinningData;
     rod::InitializeContactSkinningJacobian(contactSkin, polylineMesh, skinningData);
     rod::ResolveContactSkinningJacobian(contactSkin, polylineMesh, basePose, skinningData);
 

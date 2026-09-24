@@ -83,6 +83,7 @@ class SceneImpl final : public Scene {
   Actor* CreateSoftActor(SoftActorParams const& params, Error& error) override;
   Actor* CreateArticulatedActor(ArticulatedActorParams const& params, Error& error) override;
   Actor* CreateSoftSkinnedActor(SoftSkinnedActorParams const& params, Error& error) override;
+  void DestroyActor(Actor* actor) override;
   void DestroyActor(ActorHandle actor) override;
   Actor* GetActor(ActorHandle actor) override;
   Actor const* GetActor(ActorHandle actor) const override;
@@ -331,7 +332,7 @@ class SceneImpl final : public Scene {
   void CreateArticulatedLinkActorsImpl(
       std::string_view parentActorName,
       Span<ArticulatedLinkParams const> params,
-      bool useContact,
+      Span<bool const> useContact,
       std::shared_ptr<ArticulatedBodyShape const> shapePtr,
       TransformRT const& rootTransform,
       Span<ActorHandle> outLinks,

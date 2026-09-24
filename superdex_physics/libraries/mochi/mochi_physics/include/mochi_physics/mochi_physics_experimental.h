@@ -27,7 +27,6 @@
 
 #include <mochi_physics/mochi_physics.h>
 
-#include <mochi_core/ai/compute_type.h>
 #include <mochi_core/articulated_body/articulated_body_params.h>
 #include <mochi_core/contact/contact_params.h>
 #include <mochi_core/rom/rom_hyper_reduction_params.h>
@@ -42,12 +41,18 @@
 #include <any>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <variant>
 
 namespace mochi {
 // Forwards
 struct QPSolverParams;
 struct NewtonSolverParams;
+
+namespace prefab {
+struct AddToSceneResult;
+struct PrefabParams;
+} // namespace prefab
 
 /**
  * @brief Default finite-difference epsilon used by @ref BackPropagationSolverParams::epsFiniteDiff.
@@ -420,6 +425,14 @@ struct RomParams {
   MOCHI_STRUCT_END()
 };
 
+MOCHI_API prefab::AddToSceneResult AddToScene(
+    std::string_view prefabPath,
+    std::string_view rootPath,
+    Scene* scene,
+    prefab::PrefabParams const& params,
+    RomParams const& romParams,
+    Error& error);
+
 struct DeepModelParams {
   // Path of the file containing the deep model.
   DynamicString deepModelPath;
@@ -577,6 +590,7 @@ struct ShellActorParams {
   PointCloudColliderParams pointCloudCollider = {};
   bool hasGravity = true;
   ActorBoundaryElementType contactElementType = ActorBoundaryElementType::Default;
+  bool useContactSkin = false;
 
   MOCHI_STRUCT_BEGIN(mochi::experimental::ShellActorParams)
   MOCHI_FIELD(name)
@@ -589,6 +603,7 @@ struct ShellActorParams {
   MOCHI_FIELD(pointCloudCollider)
   MOCHI_FIELD(hasGravity)
   MOCHI_FIELD(contactElementType)
+  MOCHI_FIELD(useContactSkin)
   MOCHI_STRUCT_END()
 };
 
@@ -870,16 +885,18 @@ MOCHI_API void ConstrainNodesByPosition(
     std::function<bool(int, Real3 const&)> callback,
     Error& error);
 
-// Create a shape defined by a flow map, where the map is approximated by a neural network.
-// WARNING: Requires MOCHI_ENABLE_DEEP_FLOW_ACTORS=1.
-// WARNING: Requires libtorch (see MOCHI_USE_TORCH in mochi_config.h) if the compute type is Torch.
-[[nodiscard]] MOCHI_API ShapeHandle CreateDeepFlowShape(
-    Context* context,
-    DeepModelParams const& params, // Parameters of a deep model
-    NeuralComputeType computeType, // Compute type, e.g. MochiCpu, TorchCpu, TorchGpu
-    int preallocMemSize, // Amount of preallocated GPU memory. Only used if computeType is
-                         // TorchGpu
-    Error& error);
+/**
+ * @brief [Experimental] Creates a shape whose flow map is approximated by a neural network.
+ *
+ * @param[in] context Context that owns the shape.
+ * @param[in] params Deep flow model and normalization parameters.
+ * @param[out] error Error status. Check Error::IsOK() for success.
+ * @return A valid shape handle on success, or an invalid handle on failure.
+ *
+ * @warning Requires `MOCHI_ENABLE_DEEP_FLOW_ACTORS=1` and `MOCHI_USE_HDF5=1`.
+ */
+[[nodiscard]] MOCHI_API ShapeHandle
+CreateDeepFlowShape(Context* context, DeepModelParams const& params, Error& error);
 
 /**
  * @brief [Experimental] Additional parameters for creating a soft actor.

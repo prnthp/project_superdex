@@ -131,7 +131,7 @@ static void RegisterDebugDrawSystem_ActorAabbWorld(DebugDrawInternal& debugDraw)
   system.onDrawEntityWorldSpace =
       [](entt::registry const& reg, entt::entity e, DebugDrawCollector& out) {
         auto const& root = reg.get<CRootTransform>(e);
-        auto const& bv = reg.get<CBoundingVolume<TimeStep::Current>>(e);
+        auto const& bv = reg.get<CBoundingVolume>(e);
         if (std::holds_alternative<Plane>(bv.localShape)) {
           // This is an infinite plane. Don't draw anything.
         } else {
@@ -139,7 +139,7 @@ static void RegisterDebugDrawSystem_ActorAabbWorld(DebugDrawInternal& debugDraw)
               GetAabb(TransformShape(root.worldFromLocal, bv.localShape)), MakeColor(0x80FF80FF));
         }
       };
-  debugDraw.RegisterSystem<CRootTransform, CBoundingVolume<TimeStep::Current>>(system);
+  debugDraw.RegisterSystem<CRootTransform, CBoundingVolume>(system);
 }
 
 static void RegisterDebugDrawSystem_ActorAabbWorldConservative(DebugDrawInternal& debugDraw) {
@@ -163,14 +163,14 @@ static void RegisterDebugDrawSystem_ActorAabbLocal(DebugDrawInternal& debugDraw)
   system.sortingDepth -= 2_r; // Draw after the world-space Aabb, but before most other stuff
   system.onDrawEntityLocalSpace =
       [](entt::registry const& reg, entt::entity e, DebugDrawCollector& out) {
-        auto const& bv = reg.get<CBoundingVolume<TimeStep::Current>>(e);
+        auto const& bv = reg.get<CBoundingVolume>(e);
         if (std::holds_alternative<Plane>(bv.localShape)) {
           // This is an infinite plane. Don't draw anything.
         } else {
           out.AddWireframeAabb(GetAabb(bv.localShape), colors::kGray);
         }
       };
-  debugDraw.RegisterSystem<CBoundingVolume<TimeStep::Current>>(system);
+  debugDraw.RegisterSystem<CBoundingVolume>(system);
 }
 
 // Get a world-space Aabb that contains CBoundingVolume for all members of a group (recursively).
@@ -181,7 +181,7 @@ static std::optional<Aabb> GetGroupWorldBounds(
   bool hasBounds = false;
   ForEachDescendant(reg, members, [&](auto e) {
     auto const* root = reg.try_get<CRootTransform const>(e);
-    auto const* bounds = reg.try_get<CBoundingVolume<TimeStep::Current> const>(e);
+    auto const* bounds = reg.try_get<CBoundingVolume const>(e);
     if (root && bounds) {
       Aabb worldAabb = GetAabb(TransformShape(root->worldFromLocal, bounds->localShape));
       if (hasBounds) {
@@ -1094,10 +1094,10 @@ static void RegisterDebugDrawSystem_ActiveContactPositions(DebugDrawInternal& de
     }
 
 #if MOCHI_ASSERT_VERBOSE_ENABLED
-    // Get the actor's surface mesh for validation, unless it's a rod actor
     Span<Real3 const> coords = {};
     Span<Int3 const> faces = {};
     TransformRT const* transform = {};
+    DynamicArray<Real3> shellContactPositions;
     bool const isRodActor = reg.all_of<TagRodActor>(e);
     // Contact samples are computed from the DIRK stage variable during the Newton
     // solve, while surface node positions reflect the full-step displacement computed
@@ -1108,9 +1108,27 @@ static void RegisterDebugDrawSystem_ActiveContactPositions(DebugDrawInternal& de
       return intState && isize(intState->bTilde) == 1 && intState->bTilde[0] == 1_r;
     }();
     if (!isRodActor && stageEqualsStepEnd) {
-      coords = Unflatten<Real3 const>(reg.get<CQuerySurfaceNodePositions const>(e).nodePositions);
-      faces = Unflatten<Int3 const>(
-          reg.get<CSurfaceMesh const>(e).mesh->GetActiveNodesFlatConnectivity());
+      if (reg.all_of<TagUseDeformableContactSkin>(e)) {
+        auto const& surfaceMesh = reg.get<CSurfaceMesh const>(e).mesh;
+        coords = Unflatten<Real3 const>(reg.get<CDeformedContactSkinNodes const>(e).positions);
+        faces = Unflatten<Int3 const>(surfaceMesh->GetActiveNodesFlatConnectivity());
+      } else if (reg.all_of<TagShellActor>(e)) {
+        auto const& physicsMesh = reg.get<CTriangularMesh const>(e).mesh;
+        auto const& displacements =
+            reg.get<CFinalDisplacementRef<TimeStep::Current> const>(e).value;
+        auto const referencePositions = physicsMesh->GetNodeCoordinates();
+        auto const displacementVectors = Unflatten<Real3 const>(displacements.GetConstSpan());
+        shellContactPositions.resize_noinit(referencePositions.size());
+        for (int i = 0; i < isize(referencePositions); ++i) {
+          shellContactPositions[i] = referencePositions[i] + displacementVectors[i];
+        }
+        coords = MakeConstSpan(shellContactPositions);
+        faces = physicsMesh->GetElementConnectivity();
+      } else {
+        coords = Unflatten<Real3 const>(reg.get<CQuerySurfaceNodePositions const>(e).nodePositions);
+        faces = Unflatten<Int3 const>(
+            reg.get<CSurfaceMesh const>(e).mesh->GetActiveNodesFlatConnectivity());
+      }
       transform = &reg.get<CRootTransform const>(e).worldFromLocal;
     }
 #endif // MOCHI_ASSERT_VERBOSE_ENABLED
@@ -1196,9 +1214,10 @@ static void RegisterDebugDrawSystem_NodeContactForces(DebugDrawInternal& debugDr
         auto const& contacts = reg.get<CQueryNodeContactForces const>(e).nodeContactForces;
         auto const& volumePositions = reg.get<CQueryNodePositions const>(e);
         auto const& surfacePositions = reg.get<CQuerySurfaceNodePositions const>(e);
+        bool const useSurfacePositions =
+            volumePositions.nodePositions.empty() || reg.all_of<TagUseDeformableContactSkin>(e);
         auto positions = Unflatten<Real3 const>(MakeSpan(
-            volumePositions.nodePositions.empty() ? surfacePositions.nodePositions
-                                                  : volumePositions.nodePositions));
+            useSurfacePositions ? surfacePositions.nodePositions : volumePositions.nodePositions));
         std::vector<LineVertex> verts(contacts.size() * 2);
         size_t vi = 0;
         for (auto const& contact : contacts) {
@@ -1297,7 +1316,7 @@ static void RegisterDebugDrawSystem_PotentialColliders(DebugDrawInternal& debugD
                                      entt::entity e,
                                      DebugDrawCollector& out) {
     auto const& actorRoot = reg.get<CRootTransform const>(e);
-    auto const& actorBv = reg.get<CBoundingVolume<TimeStep::Current> const>(e);
+    auto const& actorBv = reg.get<CBoundingVolume const>(e);
     auto const actorCenter =
         actorRoot.worldFromLocal.TransformPoint(GetBoundingSphere(actorBv.localShape).GetCenter());
 
@@ -1305,7 +1324,7 @@ static void RegisterDebugDrawSystem_PotentialColliders(DebugDrawInternal& debugD
     auto registerCollisionsFunc = [&](Span<PotentialColliderData const> colls) {
       for (auto const& coll : colls) {
         auto const& collRoot = reg.get<CRootTransform const>(coll.entity);
-        auto const& collBv = reg.get<CBoundingVolume<TimeStep::Current> const>(coll.entity);
+        auto const& collBv = reg.get<CBoundingVolume const>(coll.entity);
         auto const collCenter = collRoot.worldFromLocal.TransformPoint(
             GetBoundingSphere(collBv.localShape).GetCenter());
         LineVertex verts[2];
@@ -1325,8 +1344,7 @@ static void RegisterDebugDrawSystem_PotentialColliders(DebugDrawInternal& debugD
     }
   };
 
-  debugDraw.RegisterSystem<CRootTransform, CBoundingVolume<TimeStep::Current>, TagUseContact>(
-      system);
+  debugDraw.RegisterSystem<CRootTransform, CBoundingVolume, TagUseContact>(system);
 }
 
 static void RegisterDebugDrawSystem_RigidVelocity(DebugDrawInternal& debugDraw) {
