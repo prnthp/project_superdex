@@ -18,6 +18,7 @@
 
 #include "meshing/processing_modifiers/export_mesh_file.h"
 #include "meshing/processing_modifiers/export_mochi_model.h"
+#include "meshing/processing_modifiers/export_visual_mesh.h"
 #include "meshing/processing_modifiers/refine_mesh.h"
 #include "meshing/processing_modifiers/remesh.h"
 #include "meshing/processing_modifiers/source_cad_model.h"
@@ -49,6 +50,7 @@ std::vector<ModifierRegistryEntry> const& ProcessingModifierRegistry() {
     // Exports
     entries.push_back(MakeMochiModelExportEntry());
     entries.push_back(MakeExportMeshFileEntry());
+    entries.push_back(MakeStepToVisualMeshEntry());
     return entries;
   }();
   return registry;
